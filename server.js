@@ -7,17 +7,19 @@ const cookieParser = require("cookie-parser");
 
 const app = express();
 
+// CORS for cookies
+app.use(
+  cors({
+    origin: ["http://localhost:5173", "https://mrats-client.vercel.app"],
+    credentials: true,
+  })
+);
+
 // Middleware
 app.use(express.json());
 app.use(cookieParser());
 
-// CORS for cookies
-app.use(
-  cors({
-    origin: ["http://localhost:5173", "https://mrats-client.vercel.app/"],
-    credentials: true,
-  })
-);
+
 
 /* ------------------- MONGODB SETUP ------------------- */
 
