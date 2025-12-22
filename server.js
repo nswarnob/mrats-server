@@ -14,7 +14,7 @@ app.use(cookieParser());
 // CORS for cookies
 app.use(
   cors({
-    origin: ["http://localhost:5173", "https://mrats-server.vercel.app/"],
+    origin: ["http://localhost:5173", "https://mrats-client.vercel.app/"],
     credentials: true,
   })
 );
