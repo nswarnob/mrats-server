@@ -14,10 +14,12 @@ app.use(cookieParser());
 // CORS for cookies
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: ["http://localhost:5173", "https://mrats-server.vercel.app/"],
     credentials: true,
   })
 );
+
+/* ------------------- MONGODB SETUP ------------------- */
 
 const uri = process.env.MONGO_URI;
 let db;
@@ -103,7 +105,7 @@ app.get("/users/role", async (req, res) => {
   res.send({ role: user?.role || "borrower" });
 });
 
-/* ------------------- verification ------------------- */
+/* ------------------- Verification ------------------- */
 
 const verifyToken = (req, res, next) => {
   const token = req.cookies.token;
