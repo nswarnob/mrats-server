@@ -44,6 +44,7 @@ async function connectDB() {
   db = client.db("LoanLink");
   loansCollection = db.collection("loans");
   userCollection = db.collection("users");
+  applicationLoansCollection = db.collection("application");
   isConnected = true;
   console.log("✅ MongoDB connected");
 }
@@ -71,7 +72,7 @@ app.post("/jwt", async (req, res) => {
     // get role from DB
     const dbUser = await userCollection.findOne({ email });
     const role = dbUser?.role || "borrower";
- 
+
     const token = jwt.sign({ email, role }, process.env.JWT_SECRET, {
       expiresIn: "7d",
     });
@@ -196,7 +197,9 @@ app.get("/loans/:id", async (req, res) => {
 
 app.get("/application-loans", async (req, res) => {
   try {
-    const applicationLoans = await applicationLoansCollection.find({}).toArray();
+    const applicationLoans = await applicationLoansCollection
+      .find({})
+      .toArray();
     res.json(applicationLoans);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -206,7 +209,9 @@ app.get("/application-loans", async (req, res) => {
 app.post("/application-loans", async (req, res) => {
   try {
     const newApplicationLoan = req.body;
-    const result = await applicationLoansCollection.insertOne(newApplicationLoan);
+    const result = await applicationLoansCollection.insertOne(
+      newApplicationLoan
+    );
     res.status(201).json({ ...newApplicationLoan, _id: result.insertedId });
   } catch (err) {
     console.error("Error creating application loan:", err);
