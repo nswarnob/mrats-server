@@ -19,14 +19,13 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
-
-
 /* ------------------- MONGODB SETUP ------------------- */
 
 const uri = process.env.MONGO_URI;
 let db;
 let loansCollection;
 let userCollection;
+let applicationLoansCollection;
 let isConnected = false;
 
 const client = new MongoClient(uri, {
@@ -72,7 +71,7 @@ app.post("/jwt", async (req, res) => {
     // get role from DB
     const dbUser = await userCollection.findOne({ email });
     const role = dbUser?.role || "borrower";
-
+ 
     const token = jwt.sign({ email, role }, process.env.JWT_SECRET, {
       expiresIn: "7d",
     });
@@ -190,6 +189,28 @@ app.get("/loans/:id", async (req, res) => {
   } catch (err) {
     console.error("GET /loans/:id error:", err);
     res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* ------------------- APPLICATION ------------------- */
+
+app.get("/application-loans", async (req, res) => {
+  try {
+    const applicationLoans = await applicationLoansCollection.find({}).toArray();
+    res.json(applicationLoans);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/application-loans", async (req, res) => {
+  try {
+    const newApplicationLoan = req.body;
+    const result = await applicationLoansCollection.insertOne(newApplicationLoan);
+    res.status(201).json({ ...newApplicationLoan, _id: result.insertedId });
+  } catch (err) {
+    console.error("Error creating application loan:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
