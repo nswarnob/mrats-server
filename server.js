@@ -110,11 +110,6 @@ app.get("/users/role", async (req, res) => {
   res.send({ role: user?.role || "borrower" });
 });
 
-app.get("/me", verifyToken, attachUser, (req, res) => {
-  const { email, role, suspended, suspensionReason, createdAt } = req.user;
-  res.json({ email, role, suspended, suspensionReason, createdAt });
-});
-
 /* ------------------- Verification ------------------- */
 
 const verifyToken = (req, res, next) => {
@@ -162,6 +157,11 @@ const verifyRole =
     }
     next();
   };
+
+app.get("/me", verifyToken, attachUser, (req, res) => {
+  const { email, role, suspended, suspensionReason, createdAt } = req.user;
+  res.json({ email, role, suspended, suspensionReason, createdAt });
+});
 
 /* ------------------- USERS ------------------- */
 
