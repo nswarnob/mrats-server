@@ -10,7 +10,7 @@ const app = express();
 // CORS for cookies
 app.use(
   cors({
-    origin: ["http://localhost:5173", "https://mrats-client.vercel.app"],
+    origin: true,
     credentials: true,
   }),
 );
