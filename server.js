@@ -19,6 +19,9 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
+// Handle favicon.ico to prevent DB middleware from running
+app.get("/favicon.ico", (req, res) => res.status(404).end());
+
 /* ------------------- MONGODB SETUP ------------------- */
 
 const uri = process.env.MONGO_URI;
