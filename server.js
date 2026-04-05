@@ -7,31 +7,129 @@ const cookieParser = require("cookie-parser");
 
 const app = express();
 
-// CORS for cookies
+/* ------------------- CONFIG ------------------- */
+
+const isProduction = process.env.NODE_ENV === "production";
+const jwtSecret = process.env.JWT_SECRET;
+const mongoUri = process.env.MONGO_URI;
+const firebaseApiKey = process.env.FIREBASE_API_KEY;
+
+const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || "admin@gmail.com")
+  .trim()
+  .toLowerCase();
+const MANAGER_EMAIL = String(process.env.MANAGER_EMAIL || "manager@gmail.com")
+  .trim()
+  .toLowerCase();
+
+const cookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? "none" : "lax",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+  path: "/",
+};
+
+if (!jwtSecret) {
+  throw new Error("Missing JWT_SECRET");
+}
+if (!mongoUri) {
+  throw new Error("Missing MONGO_URI");
+}
+
+const allowedOrigins = (process.env.CORS_ORIGINS ||
+  "http://localhost:5173,https://mrats-client.vercel.app")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+/* ------------------- APP MIDDLEWARE ------------------- */
+
 app.use(
   cors({
-    origin: true,
     credentials: true,
+    origin: (origin, callback) => {
+      // allow non-browser requests and same-origin tools
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error("CORS: origin not allowed"));
+    },
   }),
 );
 
-// Middleware
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
-// Handle favicon.ico to prevent DB middleware from running
 app.get("/favicon.ico", (req, res) => res.status(404).end());
 
-/* ------------------- MONGODB SETUP ------------------- */
+/* ------------------- HELPERS ------------------- */
 
-const uri = process.env.MONGO_URI;
+const normalizeEmail = (email = "") => String(email).trim().toLowerCase();
+
+const getSystemRole = (email) => {
+  const normalized = normalizeEmail(email);
+  if (normalized === ADMIN_EMAIL) return "admin";
+  if (normalized === MANAGER_EMAIL) return "manager";
+  return "borrower";
+};
+
+const toObjectId = (id) => {
+  if (!ObjectId.isValid(id)) return null;
+  return new ObjectId(id);
+};
+
+const normalizeStatus = (status = "") => {
+  const value = String(status).trim().toLowerCase();
+  const map = {
+    pending: "Pending",
+    approved: "Approved",
+    rejected: "Rejected",
+    cancelled: "Cancelled",
+  };
+  return map[value] || null;
+};
+
+async function verifyFirebaseIdToken(idToken) {
+  if (!firebaseApiKey) {
+    throw new Error("Missing FIREBASE_API_KEY for ID token verification");
+  }
+
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseApiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idToken }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error("Invalid Firebase token");
+  }
+
+  const data = await response.json();
+  const firebaseUser = data?.users?.[0];
+  if (!firebaseUser?.email) {
+    throw new Error("Invalid Firebase user payload");
+  }
+
+  return {
+    email: normalizeEmail(firebaseUser.email),
+    emailVerified: !!firebaseUser.emailVerified,
+    name: firebaseUser.displayName || "",
+    photoURL: firebaseUser.photoUrl || "",
+  };
+}
+
+/* ------------------- MONGODB ------------------- */
+
 let db;
 let loansCollection;
 let userCollection;
 let applicationLoansCollection;
 let isConnected = false;
+let connectPromise = null;
 
-const client = new MongoClient(uri, {
+const client = new MongoClient(mongoUri, {
   serverSelectionTimeoutMS: 20000,
   serverApi: {
     version: ServerApiVersion.v1,
@@ -42,20 +140,31 @@ const client = new MongoClient(uri, {
 
 async function connectDB() {
   if (isConnected) return;
+  if (connectPromise) {
+    await connectPromise;
+    return;
+  }
 
-  await client.connect();
-  db = client.db("LoanLink");
-  loansCollection = db.collection("loans");
-  userCollection = db.collection("users");
-  applicationLoansCollection = db.collection("application");
-  isConnected = true;
-  console.log("✅ MongoDB connected");
+  connectPromise = client
+    .connect()
+    .then(() => {
+      db = client.db("LoanLink");
+      loansCollection = db.collection("loans");
+      userCollection = db.collection("users");
+      applicationLoansCollection = db.collection("application");
+      isConnected = true;
+      console.log("✅ MongoDB connected");
+    })
+    .finally(() => {
+      connectPromise = null;
+    });
+
+  await connectPromise;
 }
 
-// DB connected
 app.use(async (req, res, next) => {
   try {
-    if (!isConnected) await connectDB();
+    await connectDB();
     next();
   } catch (err) {
     console.error("DB connect middleware error:", err);
@@ -63,54 +172,7 @@ app.use(async (req, res, next) => {
   }
 });
 
-/* ------------------- JWT COOKIE ROUTES ------------------- */
-
-// Create token + set cookie
-app.post("/jwt", async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    if (!email) return res.status(400).json({ message: "Email required" });
-
-    // get role from DB
-    const dbUser = await userCollection.findOne({ email });
-    const role = dbUser?.role || "borrower";
-
-    const token = jwt.sign({ email, role }, process.env.JWT_SECRET, {
-      expiresIn: "7d",
-    });
-
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
-    });
-
-    res.send({ success: true, role });
-  } catch (err) {
-    console.error("POST /jwt error:", err);
-    res.status(500).json({ message: "JWT failed" });
-  }
-});
-
-// Logout clears cookie
-app.post("/logout", (req, res) => {
-  res.clearCookie("token", {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
-  });
-  res.send({ success: true });
-});
-
-// Get role by email (optional)
-app.get("/users/role", async (req, res) => {
-  const email = req.query.email;
-  const user = await userCollection.findOne({ email });
-  res.send({ role: user?.role || "borrower" });
-});
-
-/* ------------------- Verification ------------------- */
+/* ------------------- AUTH MIDDLEWARE ------------------- */
 
 const verifyToken = (req, res, next) => {
   const token = req.cookies.token;
@@ -119,7 +181,7 @@ const verifyToken = (req, res, next) => {
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
+  jwt.verify(token, jwtSecret, (err, decoded) => {
     if (err) {
       return res.status(403).json({ message: "Forbidden" });
     }
@@ -130,10 +192,22 @@ const verifyToken = (req, res, next) => {
 
 const attachUser = async (req, res, next) => {
   try {
-    const dbUser = await userCollection.findOne({ email: req.user.email });
+    const email = normalizeEmail(req.user?.email);
+    const dbUser = await userCollection.findOne({ email });
     if (!dbUser) {
       return res.status(401).json({ message: "Unauthorized" });
     }
+
+    // Always enforce system-defined role for reserved emails.
+    const forcedRole = getSystemRole(email);
+    if (dbUser.role !== forcedRole) {
+      await userCollection.updateOne(
+        { _id: dbUser._id },
+        { $set: { role: forcedRole, roleSyncedAt: new Date() } },
+      );
+      dbUser.role = forcedRole;
+    }
+
     req.user = { ...req.user, ...dbUser };
     next();
   } catch (err) {
@@ -143,7 +217,7 @@ const attachUser = async (req, res, next) => {
 };
 
 const verifyActiveUser = (req, res, next) => {
-  if (req.user.suspended) {
+  if (req.user?.suspended) {
     return res.status(403).json({ message: "Account suspended" });
   }
   next();
@@ -158,9 +232,89 @@ const verifyRole =
     next();
   };
 
+/* ------------------- JWT / SESSION ------------------- */
+
+app.post("/jwt", async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken) {
+      return res.status(400).json({ message: "Firebase idToken is required" });
+    }
+
+    const firebaseUser = await verifyFirebaseIdToken(idToken);
+    const email = firebaseUser.email;
+
+    let dbUser = await userCollection.findOne({ email });
+    const enforcedRole = getSystemRole(email);
+
+    if (!dbUser) {
+      const toInsert = {
+        name: firebaseUser.name || email.split("@")[0],
+        email,
+        photoURL: firebaseUser.photoURL || "",
+        role: enforcedRole,
+        suspended: false,
+        suspensionReason: "",
+        createdAt: new Date(),
+      };
+      const result = await userCollection.insertOne(toInsert);
+      dbUser = { ...toInsert, _id: result.insertedId };
+    } else if (dbUser.role !== enforcedRole) {
+      await userCollection.updateOne(
+        { _id: dbUser._id },
+        { $set: { role: enforcedRole, roleSyncedAt: new Date() } },
+      );
+      dbUser.role = enforcedRole;
+    }
+
+    const token = jwt.sign(
+      { email: dbUser.email, role: dbUser.role },
+      jwtSecret,
+      {
+        expiresIn: "7d",
+      },
+    );
+
+    res.cookie("token", token, cookieOptions);
+    res.json({ success: true, role: dbUser.role });
+  } catch (err) {
+    console.error("POST /jwt error:", err);
+    res.status(401).json({ message: "JWT issuance failed" });
+  }
+});
+
+app.post("/logout", (req, res) => {
+  res.clearCookie("token", {
+    ...cookieOptions,
+    maxAge: 0,
+  });
+  res.json({ success: true });
+});
+
 app.get("/me", verifyToken, attachUser, (req, res) => {
-  const { email, role, suspended, suspensionReason, createdAt } = req.user;
-  res.json({ email, role, suspended, suspensionReason, createdAt });
+  const { email, role, suspended, suspensionReason, createdAt, name, photoURL } =
+    req.user;
+  res.json({
+    email,
+    role,
+    suspended,
+    suspensionReason,
+    createdAt,
+    name,
+    photoURL,
+  });
+});
+
+app.get("/users/role", verifyToken, attachUser, async (req, res) => {
+  const requestedEmail = normalizeEmail(req.query.email || req.user.email);
+  const requesterEmail = normalizeEmail(req.user.email);
+
+  if (req.user.role !== "admin" && requestedEmail !== requesterEmail) {
+    return res.status(403).json({ message: "Forbidden" });
+  }
+
+  const user = await userCollection.findOne({ email: requestedEmail });
+  res.json({ role: user?.role || "borrower" });
 });
 
 /* ------------------- USERS ------------------- */
@@ -183,21 +337,37 @@ app.get(
 
 app.post("/users", async (req, res) => {
   try {
-    const newUser = req.body;
+    const name = String(req.body?.name || "").trim();
+    const email = normalizeEmail(req.body?.email);
+    const photoURL = String(req.body?.photoURL || "").trim();
+
+    if (!email) {
+      return res.status(400).json({ message: "Valid email is required" });
+    }
+
+    const existing = await userCollection.findOne({ email });
+    const role = getSystemRole(email);
+
+    if (existing) {
+      if (existing.role !== role) {
+        await userCollection.updateOne(
+          { _id: existing._id },
+          { $set: { role, roleSyncedAt: new Date() } },
+        );
+        existing.role = role;
+      }
+      return res.status(200).json({ ...existing, alreadyExists: true });
+    }
+
     const userToInsert = {
-      ...newUser,
-      role: newUser.role || "borrower",
-      suspended: newUser.suspended || false,
-      suspensionReason: newUser.suspensionReason || "",
+      name,
+      email,
+      photoURL,
+      role,
+      suspended: false,
+      suspensionReason: "",
       createdAt: new Date(),
     };
-
-    const existing = await userCollection.findOne({
-      email: userToInsert.email,
-    });
-    if (existing) {
-      return res.status(409).json({ message: "User already exists" });
-    }
 
     const result = await userCollection.insertOne(userToInsert);
     res.status(201).json({ ...userToInsert, _id: result.insertedId });
@@ -216,27 +386,39 @@ app.patch(
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { role } = req.body;
+      const objectId = toObjectId(id);
+      if (!objectId) {
+        return res.status(400).json({ message: "Invalid user id" });
+      }
 
+      const { role } = req.body;
       const validRoles = ["admin", "manager", "borrower"];
       if (!validRoles.includes(role)) {
         return res.status(400).json({ message: "Invalid role" });
       }
 
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).json({ message: "Invalid user id" });
+      const target = await userCollection.findOne({ _id: objectId });
+      if (!target) {
+        return res.status(404).json({ message: "User not found" });
       }
 
+      // Reserved identities keep fixed roles.
+      const forcedRole = getSystemRole(target.email);
+      const nextRole =
+        target.email === ADMIN_EMAIL || target.email === MANAGER_EMAIL
+          ? forcedRole
+          : role;
+
       const result = await userCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { role } },
+        { _id: objectId },
+        { $set: { role: nextRole } },
       );
 
       if (!result.matchedCount) {
         return res.status(404).json({ message: "User not found" });
       }
 
-      res.json({ success: true, role });
+      res.json({ success: true, role: nextRole });
     } catch (err) {
       console.error("PATCH /users/:id/role error:", err);
       res.status(500).json({ error: err.message });
@@ -253,24 +435,24 @@ app.patch(
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { suspended, suspensionReason } = req.body;
+      const objectId = toObjectId(id);
+      if (!objectId) {
+        return res.status(400).json({ message: "Invalid user id" });
+      }
 
+      const { suspended, suspensionReason } = req.body;
       if (typeof suspended !== "boolean") {
         return res.status(400).json({ message: "suspended must be a boolean" });
       }
 
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).json({ message: "Invalid user id" });
-      }
-
       const update = {
         suspended,
-        suspensionReason: suspended ? suspensionReason || "" : "",
+        suspensionReason: suspended ? String(suspensionReason || "") : "",
         suspensionUpdatedAt: new Date(),
       };
 
       const result = await userCollection.updateOne(
-        { _id: new ObjectId(id) },
+        { _id: objectId },
         { $set: update },
       );
 
@@ -294,7 +476,17 @@ app.patch(
 
 app.get("/loans", async (req, res) => {
   try {
-    const loans = await loansCollection.find({}).toArray();
+    const query = {};
+
+    if (req.query.showOnHome === "true") {
+      query.showOnHome = true;
+    }
+
+    if (req.query.managerEmail) {
+      query.createdBy = normalizeEmail(req.query.managerEmail);
+    }
+
+    const loans = await loansCollection.find(query).toArray();
     res.json(loans);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -309,9 +501,26 @@ app.post(
   verifyRole("admin", "manager"),
   async (req, res) => {
     try {
-      const newLoan = req.body;
-      const result = await loansCollection.insertOne(newLoan);
-      res.status(201).json({ ...newLoan, _id: result.insertedId });
+      const payload = req.body || {};
+      const loanToInsert = {
+        title: String(payload.title || "").trim(),
+        category: String(payload.category || "").trim(),
+        description: String(payload.description || "").trim(),
+        image: String(payload.image || "").trim(),
+        interestRate: Number(payload.interestRate || 0),
+        maxLimit: Number(payload.maxLimit || 0),
+        emiPlans: Array.isArray(payload.emiPlans) ? payload.emiPlans : [],
+        showOnHome: !!payload.showOnHome,
+        createdBy: normalizeEmail(req.user.email),
+        createdAt: new Date(),
+      };
+
+      if (!loanToInsert.title || !loanToInsert.category || !loanToInsert.description) {
+        return res.status(400).json({ message: "Invalid loan payload" });
+      }
+
+      const result = await loansCollection.insertOne(loanToInsert);
+      res.status(201).json({ ...loanToInsert, _id: result.insertedId });
     } catch (err) {
       console.error("Error creating loan:", err);
       res.status(500).json({ error: err.message });
@@ -327,16 +536,30 @@ app.patch(
   verifyRole("admin", "manager"),
   async (req, res) => {
     try {
-      const { id } = req.params;
-      const updates = { ...req.body };
-      delete updates._id;
-
-      if (!ObjectId.isValid(id)) {
+      const objectId = toObjectId(req.params.id);
+      if (!objectId) {
         return res.status(400).json({ message: "Invalid loan id" });
       }
 
+      const existing = await loansCollection.findOne({ _id: objectId });
+      if (!existing) {
+        return res.status(404).json({ message: "Loan not found" });
+      }
+
+      if (
+        req.user.role === "manager" &&
+        normalizeEmail(existing.createdBy) !== normalizeEmail(req.user.email)
+      ) {
+        return res.status(403).json({ message: "Managers can only edit own loans" });
+      }
+
+      const updates = { ...req.body };
+      delete updates._id;
+      delete updates.createdBy;
+      updates.updatedAt = new Date();
+
       const result = await loansCollection.updateOne(
-        { _id: new ObjectId(id) },
+        { _id: objectId },
         { $set: updates },
       );
 
@@ -354,13 +577,12 @@ app.patch(
 
 app.get("/loans/:id", async (req, res) => {
   try {
-    const id = req.params.id;
-
-    if (!ObjectId.isValid(id)) {
+    const objectId = toObjectId(req.params.id);
+    if (!objectId) {
       return res.status(400).json({ message: "Invalid loan id" });
     }
 
-    const loan = await loansCollection.findOne({ _id: new ObjectId(id) });
+    const loan = await loansCollection.findOne({ _id: objectId });
     if (!loan) return res.status(404).json({ message: "Loan not found" });
 
     res.json(loan);
@@ -370,20 +592,44 @@ app.get("/loans/:id", async (req, res) => {
   }
 });
 
-/* ------------------- APPLICATION ------------------- */
+/* ------------------- APPLICATIONS ------------------- */
 
 app.get(
   "/application-loans",
   verifyToken,
   attachUser,
   verifyActiveUser,
-  verifyRole("admin", "manager"),
   async (req, res) => {
     try {
-      const applicationLoans = await applicationLoansCollection
-        .find({})
+      const query = {};
+      const requesterEmail = normalizeEmail(req.user.email);
+
+      if (req.user.role === "borrower") {
+        query.applicantEmail = requesterEmail;
+      } else if (req.user.role === "manager") {
+        query.loanManagerEmail = requesterEmail;
+      }
+
+      if (req.user.role === "admin" && req.query.borrowerEmail) {
+        query.applicantEmail = normalizeEmail(req.query.borrowerEmail);
+      }
+
+      if (req.query.managerEmail) {
+        const managerEmail = normalizeEmail(req.query.managerEmail);
+        if (req.user.role === "manager" && managerEmail !== requesterEmail) {
+          return res.status(403).json({ message: "Forbidden" });
+        }
+        if (req.user.role !== "borrower") {
+          query.loanManagerEmail = managerEmail;
+        }
+      }
+
+      const items = await applicationLoansCollection
+        .find(query)
+        .sort({ createdAt: -1 })
         .toArray();
-      res.json(applicationLoans);
+
+      res.json(items);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -395,17 +641,56 @@ app.post(
   verifyToken,
   attachUser,
   verifyActiveUser,
+  verifyRole("borrower"),
   async (req, res) => {
     try {
-      const newApplicationLoan = {
-        ...req.body,
-        status: req.body.status || "pending",
-        applicantEmail: req.user.email,
+      const payload = req.body || {};
+      const loanObjectId = toObjectId(payload.loanId);
+      if (!loanObjectId) {
+        return res.status(400).json({ message: "Invalid loan id" });
+      }
+
+      const sourceLoan = await loansCollection.findOne({ _id: loanObjectId });
+      if (!sourceLoan) {
+        return res.status(404).json({ message: "Loan not found" });
+      }
+
+      const applicationToInsert = {
+        loanId: sourceLoan._id,
+        loanTitle: String(sourceLoan.title || payload.loanTitle || "").trim(),
+        category: String(sourceLoan.category || payload.category || "").trim(),
+        interestRate: Number(
+          sourceLoan.interestRate || payload.interestRate || sourceLoan.interest || 0,
+        ),
+        loanAmount: Number(payload.loanAmount || 0),
+        reason: String(payload.reason || "").trim(),
+        address: String(payload.address || "").trim(),
+        notes: String(payload.notes || "").trim(),
+
+        firstName: String(payload.firstName || "").trim(),
+        lastName: String(payload.lastName || "").trim(),
+        contactNumber: String(payload.contactNumber || "").trim(),
+        nationalId: String(payload.nationalId || "").trim(),
+        incomeSource: String(payload.incomeSource || "").trim(),
+        monthlyIncome: Number(payload.monthlyIncome || 0),
+
+        applicantEmail: normalizeEmail(req.user.email),
+        borrowerEmail: normalizeEmail(req.user.email),
+        borrowerName: String(req.user.name || payload.borrowerName || "").trim(),
+
+        loanManagerEmail: normalizeEmail(sourceLoan.createdBy || ""),
+
+        status: "Pending",
+        feeStatus: "Unpaid",
         createdAt: new Date(),
       };
-      const result =
-        await applicationLoansCollection.insertOne(newApplicationLoan);
-      res.status(201).json({ ...newApplicationLoan, _id: result.insertedId });
+
+      if (!applicationToInsert.loanAmount || !applicationToInsert.reason) {
+        return res.status(400).json({ message: "Invalid application payload" });
+      }
+
+      const result = await applicationLoansCollection.insertOne(applicationToInsert);
+      res.status(201).json({ ...applicationToInsert, _id: result.insertedId });
     } catch (err) {
       console.error("Error creating application loan:", err);
       res.status(500).json({ error: err.message });
@@ -418,30 +703,71 @@ app.patch(
   verifyToken,
   attachUser,
   verifyActiveUser,
-  verifyRole("admin", "manager"),
   async (req, res) => {
     try {
-      const { id } = req.params;
-      const { status, decisionReason } = req.body;
-      const validStatuses = ["pending", "approved", "rejected"];
-
-      if (!validStatuses.includes(status)) {
-        return res.status(400).json({ message: "Invalid status" });
-      }
-
-      if (!ObjectId.isValid(id)) {
+      const objectId = toObjectId(req.params.id);
+      if (!objectId) {
         return res.status(400).json({ message: "Invalid application id" });
       }
 
+      const normalizedStatus = normalizeStatus(req.body?.status);
+      if (!normalizedStatus) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      const application = await applicationLoansCollection.findOne({ _id: objectId });
+      if (!application) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
+      const requesterRole = req.user.role;
+      const requesterEmail = normalizeEmail(req.user.email);
+
+      // Borrower can only cancel own pending application.
+      if (requesterRole === "borrower") {
+        if (normalizedStatus !== "Cancelled") {
+          return res.status(403).json({ message: "Forbidden" });
+        }
+        if (normalizeEmail(application.applicantEmail) !== requesterEmail) {
+          return res.status(403).json({ message: "Forbidden" });
+        }
+        if (normalizeStatus(application.status) !== "Pending") {
+          return res
+            .status(400)
+            .json({ message: "Only pending applications can be cancelled" });
+        }
+      }
+
+      // Managers can only review applications for their own loans.
+      if (
+        requesterRole === "manager" &&
+        normalizeEmail(application.loanManagerEmail) !== requesterEmail
+      ) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      if (!["admin", "manager", "borrower"].includes(requesterRole)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
       const update = {
-        status,
-        reviewedBy: req.user.email,
-        reviewedAt: new Date(),
-        decisionReason: status === "pending" ? "" : decisionReason || "",
+        status: normalizedStatus,
+        updatedAt: new Date(),
       };
 
+      if (requesterRole === "admin" || requesterRole === "manager") {
+        update.reviewedBy = requesterEmail;
+        update.reviewedAt = new Date();
+        update.decisionReason =
+          normalizedStatus === "Pending" ? "" : String(req.body?.decisionReason || "");
+      }
+
+      if (normalizedStatus === "Cancelled") {
+        update.cancelledAt = new Date();
+      }
+
       const result = await applicationLoansCollection.updateOne(
-        { _id: new ObjectId(id) },
+        { _id: objectId },
         { $set: update },
       );
 
@@ -449,9 +775,95 @@ app.patch(
         return res.status(404).json({ message: "Application not found" });
       }
 
-      res.json({ success: true, status, reviewedBy: req.user.email });
+      res.json({ success: true, status: normalizedStatus });
     } catch (err) {
       console.error("PATCH /application-loans/:id/status error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+app.patch(
+  "/application-loans/:id/payment",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("borrower"),
+  async (req, res) => {
+    try {
+      const objectId = toObjectId(req.params.id);
+      if (!objectId) {
+        return res.status(400).json({ message: "Invalid application id" });
+      }
+
+      const application = await applicationLoansCollection.findOne({ _id: objectId });
+      if (!application) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
+      if (normalizeEmail(application.applicantEmail) !== normalizeEmail(req.user.email)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      const update = {
+        feeStatus: "Paid",
+        paymentMethod: String(req.body?.paymentMethod || "stripe_demo"),
+        paidAmount: Number(req.body?.paidAmount || 10),
+        paymentUpdatedAt: new Date(),
+      };
+
+      await applicationLoansCollection.updateOne(
+        { _id: objectId },
+        { $set: update },
+      );
+
+      res.json({ success: true, feeStatus: "Paid" });
+    } catch (err) {
+      console.error("PATCH /application-loans/:id/payment error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+// fallback patch for borrower-owned fee updates used by frontend fallback
+app.patch(
+  "/application-loans/:id",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("borrower"),
+  async (req, res) => {
+    try {
+      const objectId = toObjectId(req.params.id);
+      if (!objectId) {
+        return res.status(400).json({ message: "Invalid application id" });
+      }
+
+      const application = await applicationLoansCollection.findOne({ _id: objectId });
+      if (!application) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
+      if (normalizeEmail(application.applicantEmail) !== normalizeEmail(req.user.email)) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      const updates = {};
+      if (req.body?.feeStatus) updates.feeStatus = String(req.body.feeStatus);
+      if (req.body?.paymentMethod)
+        updates.paymentMethod = String(req.body.paymentMethod);
+      if (req.body?.paidAmount !== undefined)
+        updates.paidAmount = Number(req.body.paidAmount);
+      updates.updatedAt = new Date();
+
+      await applicationLoansCollection.updateOne(
+        { _id: objectId },
+        { $set: updates },
+      );
+
+      res.json({ success: true, updatedFields: updates });
+    } catch (err) {
+      console.error("PATCH /application-loans/:id error:", err);
       res.status(500).json({ error: err.message });
     }
   },
