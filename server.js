@@ -12,7 +12,7 @@ app.use(
   cors({
     origin: ["http://localhost:5173", "https://mrats-client.vercel.app"],
     credentials: true,
-  })
+  }),
 );
 
 // Middleware
@@ -107,6 +107,11 @@ app.get("/users/role", async (req, res) => {
   res.send({ role: user?.role || "borrower" });
 });
 
+app.get("/me", verifyToken, attachUser, (req, res) => {
+  const { email, role, suspended, suspensionReason, createdAt } = req.user;
+  res.json({ email, role, suspended, suspensionReason, createdAt });
+});
+
 /* ------------------- Verification ------------------- */
 
 const verifyToken = (req, res, next) => {
@@ -125,33 +130,162 @@ const verifyToken = (req, res, next) => {
   });
 };
 
+const attachUser = async (req, res, next) => {
+  try {
+    const dbUser = await userCollection.findOne({ email: req.user.email });
+    if (!dbUser) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    req.user = { ...req.user, ...dbUser };
+    next();
+  } catch (err) {
+    console.error("attachUser error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+const verifyActiveUser = (req, res, next) => {
+  if (req.user.suspended) {
+    return res.status(403).json({ message: "Account suspended" });
+  }
+  next();
+};
+
+const verifyRole =
+  (...allowedRoles) =>
+  (req, res, next) => {
+    if (!req.user?.role || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+    next();
+  };
+
 /* ------------------- USERS ------------------- */
 
-app.get("/users", verifyToken, async (req, res) => {
-  try {
-    const users = await userCollection.find({}).toArray();
-    res.json(users);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+app.get(
+  "/users",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin"),
+  async (req, res) => {
+    try {
+      const users = await userCollection.find({}).toArray();
+      res.json(users);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 app.post("/users", async (req, res) => {
   try {
     const newUser = req.body;
+    const userToInsert = {
+      ...newUser,
+      role: newUser.role || "borrower",
+      suspended: newUser.suspended || false,
+      suspensionReason: newUser.suspensionReason || "",
+      createdAt: new Date(),
+    };
 
-    const existing = await userCollection.findOne({ email: newUser.email });
+    const existing = await userCollection.findOne({
+      email: userToInsert.email,
+    });
     if (existing) {
       return res.status(409).json({ message: "User already exists" });
     }
 
-    const result = await userCollection.insertOne(newUser);
-    res.status(201).json({ ...newUser, _id: result.insertedId });
+    const result = await userCollection.insertOne(userToInsert);
+    res.status(201).json({ ...userToInsert, _id: result.insertedId });
   } catch (err) {
     console.error("Error creating user:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
+app.patch(
+  "/users/:id/role",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { role } = req.body;
+
+      const validRoles = ["admin", "manager", "borrower"];
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ message: "Invalid role" });
+      }
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid user id" });
+      }
+
+      const result = await userCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { role } },
+      );
+
+      if (!result.matchedCount) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      res.json({ success: true, role });
+    } catch (err) {
+      console.error("PATCH /users/:id/role error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+app.patch(
+  "/users/:id/suspension",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { suspended, suspensionReason } = req.body;
+
+      if (typeof suspended !== "boolean") {
+        return res.status(400).json({ message: "suspended must be a boolean" });
+      }
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid user id" });
+      }
+
+      const update = {
+        suspended,
+        suspensionReason: suspended ? suspensionReason || "" : "",
+        suspensionUpdatedAt: new Date(),
+      };
+
+      const result = await userCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: update },
+      );
+
+      if (!result.matchedCount) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      res.json({
+        success: true,
+        suspended,
+        suspensionReason: update.suspensionReason,
+      });
+    } catch (err) {
+      console.error("PATCH /users/:id/suspension error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 /* ------------------- LOANS ------------------- */
 
@@ -164,16 +298,56 @@ app.get("/loans", async (req, res) => {
   }
 });
 
-app.post("/loans", async (req, res) => {
-  try {
-    const newLoan = req.body;
-    const result = await loansCollection.insertOne(newLoan);
-    res.status(201).json({ ...newLoan, _id: result.insertedId });
-  } catch (err) {
-    console.error("Error creating loan:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
+app.post(
+  "/loans",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const newLoan = req.body;
+      const result = await loansCollection.insertOne(newLoan);
+      res.status(201).json({ ...newLoan, _id: result.insertedId });
+    } catch (err) {
+      console.error("Error creating loan:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+app.patch(
+  "/loans/:id",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const updates = { ...req.body };
+      delete updates._id;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid loan id" });
+      }
+
+      const result = await loansCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updates },
+      );
+
+      if (!result.matchedCount) {
+        return res.status(404).json({ message: "Loan not found" });
+      }
+
+      res.json({ success: true, updatedFields: updates });
+    } catch (err) {
+      console.error("PATCH /loans/:id error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 app.get("/loans/:id", async (req, res) => {
   try {
@@ -195,29 +369,90 @@ app.get("/loans/:id", async (req, res) => {
 
 /* ------------------- APPLICATION ------------------- */
 
-app.get("/application-loans", async (req, res) => {
-  try {
-    const applicationLoans = await applicationLoansCollection
-      .find({})
-      .toArray();
-    res.json(applicationLoans);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+app.get(
+  "/application-loans",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const applicationLoans = await applicationLoansCollection
+        .find({})
+        .toArray();
+      res.json(applicationLoans);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
-app.post("/application-loans", async (req, res) => {
-  try {
-    const newApplicationLoan = req.body;
-    const result = await applicationLoansCollection.insertOne(
-      newApplicationLoan
-    );
-    res.status(201).json({ ...newApplicationLoan, _id: result.insertedId });
-  } catch (err) {
-    console.error("Error creating application loan:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
+app.post(
+  "/application-loans",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  async (req, res) => {
+    try {
+      const newApplicationLoan = {
+        ...req.body,
+        status: req.body.status || "pending",
+        applicantEmail: req.user.email,
+        createdAt: new Date(),
+      };
+      const result =
+        await applicationLoansCollection.insertOne(newApplicationLoan);
+      res.status(201).json({ ...newApplicationLoan, _id: result.insertedId });
+    } catch (err) {
+      console.error("Error creating application loan:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+app.patch(
+  "/application-loans/:id/status",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin", "manager"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, decisionReason } = req.body;
+      const validStatuses = ["pending", "approved", "rejected"];
+
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid application id" });
+      }
+
+      const update = {
+        status,
+        reviewedBy: req.user.email,
+        reviewedAt: new Date(),
+        decisionReason: status === "pending" ? "" : decisionReason || "",
+      };
+
+      const result = await applicationLoansCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: update },
+      );
+
+      if (!result.matchedCount) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
+      res.json({ success: true, status, reviewedBy: req.user.email });
+    } catch (err) {
+      console.error("PATCH /application-loans/:id/status error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 /* ------------------- BASE ------------------- */
 
