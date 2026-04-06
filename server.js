@@ -472,6 +472,48 @@ app.patch(
   },
 );
 
+app.delete(
+  "/users/:id",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin"),
+  async (req, res) => {
+    try {
+      const objectId = toObjectId(req.params.id);
+      if (!objectId) {
+        return res.status(400).json({ message: "Invalid user id" });
+      }
+
+      const user = await userCollection.findOne({ _id: objectId });
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      // Prevent deleting currently authenticated admin account
+      if (normalizeEmail(user.email) === normalizeEmail(req.user.email)) {
+        return res
+          .status(400)
+          .json({ message: "You cannot delete your own active account" });
+      }
+
+      await applicationLoansCollection.deleteMany({
+        applicantEmail: normalizeEmail(user.email),
+      });
+
+      const result = await userCollection.deleteOne({ _id: objectId });
+      if (!result.deletedCount) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      res.json({ success: true, deletedUserId: req.params.id });
+    } catch (err) {
+      console.error("DELETE /users/:id error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
 /* ------------------- LOANS ------------------- */
 
 app.get("/loans", async (req, res) => {
@@ -570,6 +612,39 @@ app.patch(
       res.json({ success: true, updatedFields: updates });
     } catch (err) {
       console.error("PATCH /loans/:id error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
+
+app.delete(
+  "/loans/:id",
+  verifyToken,
+  attachUser,
+  verifyActiveUser,
+  verifyRole("admin"),
+  async (req, res) => {
+    try {
+      const objectId = toObjectId(req.params.id);
+      if (!objectId) {
+        return res.status(400).json({ message: "Invalid loan id" });
+      }
+
+      const existing = await loansCollection.findOne({ _id: objectId });
+      if (!existing) {
+        return res.status(404).json({ message: "Loan not found" });
+      }
+
+      await applicationLoansCollection.deleteMany({ loanId: objectId });
+
+      const result = await loansCollection.deleteOne({ _id: objectId });
+      if (!result.deletedCount) {
+        return res.status(404).json({ message: "Loan not found" });
+      }
+
+      res.json({ success: true, deletedLoanId: req.params.id });
+    } catch (err) {
+      console.error("DELETE /loans/:id error:", err);
       res.status(500).json({ error: err.message });
     }
   },
