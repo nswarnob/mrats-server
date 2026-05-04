@@ -4,6 +4,7 @@ const cors = require("cors");
 require("dotenv").config();
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 
@@ -44,6 +45,22 @@ const allowedOrigins = (process.env.CORS_ORIGINS ||
 
 /* ------------------- APP MIDDLEWARE ------------------- */
 
+/* ------------------- RATE LIMITING ------------------- */
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === "/favicon.ico",
+});
+
+const jwtLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10, // stricter limit for auth endpoints
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use(
   cors({
     credentials: true,
@@ -58,6 +75,7 @@ app.use(
 
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
+app.use(limiter);
 
 app.get("/favicon.ico", (req, res) => res.status(404).end());
 
@@ -131,6 +149,8 @@ let connectPromise = null;
 
 const client = new MongoClient(mongoUri, {
   serverSelectionTimeoutMS: 20000,
+  retryWrites: true,
+  w: "majority",
   serverApi: {
     version: ServerApiVersion.v1,
     strict: true,
@@ -155,11 +175,28 @@ async function connectDB() {
       isConnected = true;
       console.log("✅ MongoDB connected");
     })
+    .catch((err) => {
+      console.error("❌ MongoDB connection failed:", err.message);
+      isConnected = false;
+      throw err;
+    })
     .finally(() => {
       connectPromise = null;
     });
 
   await connectPromise;
+}
+
+async function closeDB() {
+  if (client) {
+    try {
+      await client.close();
+      isConnected = false;
+      console.log("✅ MongoDB connection closed");
+    } catch (err) {
+      console.error("Error closing MongoDB:", err);
+    }
+  }
 }
 
 app.use(async (req, res, next) => {
@@ -234,7 +271,7 @@ const verifyRole =
 
 /* ------------------- JWT / SESSION ------------------- */
 
-app.post("/jwt", async (req, res) => {
+app.post("/jwt", jwtLimiter, async (req, res) => {
   try {
     const { idToken } = req.body;
     if (!idToken) {
@@ -335,13 +372,13 @@ app.get(
   },
 );
 
-app.post("/users", async (req, res) => {
+app.post("/users", jwtLimiter, async (req, res) => {
   try {
     const name = String(req.body?.name || "").trim();
     const email = normalizeEmail(req.body?.email);
     const photoURL = String(req.body?.photoURL || "").trim();
 
-    if (!email) {
+    if (!email || !email.includes("@")) {
       return res.status(400).json({ message: "Valid email is required" });
     }
 
@@ -544,22 +581,40 @@ app.post(
   async (req, res) => {
     try {
       const payload = req.body || {};
+      const title = String(payload.title || "").trim();
+      const category = String(payload.category || "").trim();
+      const description = String(payload.description || "").trim();
+      const interestRate = Number(payload.interestRate || 0);
+      const maxLimit = Number(payload.maxLimit || 0);
+
+      if (!title || !category || !description) {
+        return res.status(400).json({ message: "Title, category, and description are required" });
+      }
+
+      if (title.length < 3 || title.length > 100) {
+        return res.status(400).json({ message: "Title must be 3-100 characters" });
+      }
+
+      if (interestRate < 0 || interestRate > 100) {
+        return res.status(400).json({ message: "Interest rate must be 0-100" });
+      }
+
+      if (maxLimit < 0) {
+        return res.status(400).json({ message: "Max limit cannot be negative" });
+      }
+
       const loanToInsert = {
-        title: String(payload.title || "").trim(),
-        category: String(payload.category || "").trim(),
-        description: String(payload.description || "").trim(),
+        title,
+        category,
+        description,
         image: String(payload.image || "").trim(),
-        interestRate: Number(payload.interestRate || 0),
-        maxLimit: Number(payload.maxLimit || 0),
+        interestRate,
+        maxLimit,
         emiPlans: Array.isArray(payload.emiPlans) ? payload.emiPlans : [],
         showOnHome: !!payload.showOnHome,
         createdBy: normalizeEmail(req.user.email),
         createdAt: new Date(),
       };
-
-      if (!loanToInsert.title || !loanToInsert.category || !loanToInsert.description) {
-        return res.status(400).json({ message: "Invalid loan payload" });
-      }
 
       const result = await loansCollection.insertOne(loanToInsert);
       res.status(201).json({ ...loanToInsert, _id: result.insertedId });
@@ -730,28 +785,44 @@ app.post(
         return res.status(404).json({ message: "Loan not found" });
       }
 
+      const loanAmount = Number(payload.loanAmount || 0);
+      const monthlyIncome = Number(payload.monthlyIncome || 0);
+      const reason = String(payload.reason || "").trim();
+      const firstName = String(payload.firstName || "").trim();
+      const lastName = String(payload.lastName || "").trim();
+
+      if (loanAmount <= 0 || loanAmount > sourceLoan.maxLimit) {
+        return res.status(400).json({ message: `Loan amount must be 1-${sourceLoan.maxLimit}` });
+      }
+
+      if (!reason || reason.length < 5) {
+        return res.status(400).json({ message: "Reason must be at least 5 characters" });
+      }
+
+      if (!firstName || !lastName) {
+        return res.status(400).json({ message: "First and last name are required" });
+      }
+
       const applicationToInsert = {
         loanId: sourceLoan._id,
-        loanTitle: String(sourceLoan.title || payload.loanTitle || "").trim(),
-        category: String(sourceLoan.category || payload.category || "").trim(),
-        interestRate: Number(
-          sourceLoan.interestRate || payload.interestRate || sourceLoan.interest || 0,
-        ),
-        loanAmount: Number(payload.loanAmount || 0),
-        reason: String(payload.reason || "").trim(),
+        loanTitle: String(sourceLoan.title || "").trim(),
+        category: String(sourceLoan.category || "").trim(),
+        interestRate: Number(sourceLoan.interestRate || 0),
+        loanAmount,
+        reason,
         address: String(payload.address || "").trim(),
         notes: String(payload.notes || "").trim(),
 
-        firstName: String(payload.firstName || "").trim(),
-        lastName: String(payload.lastName || "").trim(),
+        firstName,
+        lastName,
         contactNumber: String(payload.contactNumber || "").trim(),
         nationalId: String(payload.nationalId || "").trim(),
         incomeSource: String(payload.incomeSource || "").trim(),
-        monthlyIncome: Number(payload.monthlyIncome || 0),
+        monthlyIncome,
 
         applicantEmail: normalizeEmail(req.user.email),
         borrowerEmail: normalizeEmail(req.user.email),
-        borrowerName: String(req.user.name || payload.borrowerName || "").trim(),
+        borrowerName: String(req.user.name || "").trim(),
 
         loanManagerEmail: normalizeEmail(sourceLoan.createdBy || ""),
 
@@ -759,10 +830,6 @@ app.post(
         feeStatus: "Unpaid",
         createdAt: new Date(),
       };
-
-      if (!applicationToInsert.loanAmount || !applicationToInsert.reason) {
-        return res.status(400).json({ message: "Invalid application payload" });
-      }
 
       const result = await applicationLoansCollection.insertOne(applicationToInsert);
       res.status(201).json({ ...applicationToInsert, _id: result.insertedId });
@@ -950,8 +1017,35 @@ app.get("/", (req, res) => res.send("API is running..."));
 
 const PORT = process.env.PORT || 3000;
 
+// Graceful shutdown handler
+async function gracefulShutdown(signal) {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+  try {
+    await closeDB();
+    process.exit(0);
+  } catch (err) {
+    console.error("Error during shutdown:", err);
+    process.exit(1);
+  }
+}
+
 if (process.env.VERCEL) {
   module.exports = app;
 } else {
-  app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+  const server = app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+
+  // Handle shutdown signals
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+  // Handle uncaught exceptions
+  process.on("uncaughtException", (err) => {
+    console.error("Uncaught Exception:", err);
+    process.exit(1);
+  });
+
+  process.on("unhandledRejection", (err) => {
+    console.error("Unhandled Rejection:", err);
+    process.exit(1);
+  });
 }
