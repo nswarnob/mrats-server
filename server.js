@@ -6,6 +6,9 @@ const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 
+// Import payment routes
+const paymentRoutes = require("./api/routes/payments");
+
 const app = express();
 
 /* ------------------- CONFIG ------------------- */
@@ -76,6 +79,9 @@ app.use(
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 app.use(limiter);
+
+// Connect payment routes
+app.use("/api/payments", paymentRoutes);
 
 app.get("/favicon.ico", (req, res) => res.status(404).end());
 
