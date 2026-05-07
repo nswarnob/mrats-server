@@ -40,11 +40,15 @@ if (!mongoUri) {
   throw new Error("Missing MONGO_URI");
 }
 
-const allowedOrigins = (process.env.CORS_ORIGINS ||
-  "http://localhost:5173,https://mrats-client.vercel.app")
+const allowedOrigins = (
+  process.env.CORS_ORIGINS ||
+  "http://localhost:5173,https://mrats-client.vercel.app"
+)
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
+
+console.log("📋 Allowed CORS origins:", allowedOrigins);
 
 /* ------------------- APP MIDDLEWARE ------------------- */
 
@@ -66,13 +70,17 @@ const jwtLimiter = rateLimit({
 
 app.use(
   cors({
-    credentials: true,
     origin: (origin, callback) => {
       // allow non-browser requests and same-origin tools
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
       return callback(new Error("CORS: origin not allowed"));
     },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    exposedHeaders: ["X-Total-Count"],
+    maxAge: 86400,
   }),
 );
 
@@ -335,8 +343,15 @@ app.post("/logout", (req, res) => {
 });
 
 app.get("/me", verifyToken, attachUser, (req, res) => {
-  const { email, role, suspended, suspensionReason, createdAt, name, photoURL } =
-    req.user;
+  const {
+    email,
+    role,
+    suspended,
+    suspensionReason,
+    createdAt,
+    name,
+    photoURL,
+  } = req.user;
   res.json({
     email,
     role,
@@ -594,11 +609,15 @@ app.post(
       const maxLimit = Number(payload.maxLimit || 0);
 
       if (!title || !category || !description) {
-        return res.status(400).json({ message: "Title, category, and description are required" });
+        return res
+          .status(400)
+          .json({ message: "Title, category, and description are required" });
       }
 
       if (title.length < 3 || title.length > 100) {
-        return res.status(400).json({ message: "Title must be 3-100 characters" });
+        return res
+          .status(400)
+          .json({ message: "Title must be 3-100 characters" });
       }
 
       if (interestRate < 0 || interestRate > 100) {
@@ -606,7 +625,9 @@ app.post(
       }
 
       if (maxLimit < 0) {
-        return res.status(400).json({ message: "Max limit cannot be negative" });
+        return res
+          .status(400)
+          .json({ message: "Max limit cannot be negative" });
       }
 
       const loanToInsert = {
@@ -653,7 +674,9 @@ app.patch(
         req.user.role === "manager" &&
         normalizeEmail(existing.createdBy) !== normalizeEmail(req.user.email)
       ) {
-        return res.status(403).json({ message: "Managers can only edit own loans" });
+        return res
+          .status(403)
+          .json({ message: "Managers can only edit own loans" });
       }
 
       const updates = { ...req.body };
@@ -798,15 +821,21 @@ app.post(
       const lastName = String(payload.lastName || "").trim();
 
       if (loanAmount <= 0 || loanAmount > sourceLoan.maxLimit) {
-        return res.status(400).json({ message: `Loan amount must be 1-${sourceLoan.maxLimit}` });
+        return res
+          .status(400)
+          .json({ message: `Loan amount must be 1-${sourceLoan.maxLimit}` });
       }
 
       if (!reason || reason.length < 5) {
-        return res.status(400).json({ message: "Reason must be at least 5 characters" });
+        return res
+          .status(400)
+          .json({ message: "Reason must be at least 5 characters" });
       }
 
       if (!firstName || !lastName) {
-        return res.status(400).json({ message: "First and last name are required" });
+        return res
+          .status(400)
+          .json({ message: "First and last name are required" });
       }
 
       const applicationToInsert = {
@@ -837,7 +866,8 @@ app.post(
         createdAt: new Date(),
       };
 
-      const result = await applicationLoansCollection.insertOne(applicationToInsert);
+      const result =
+        await applicationLoansCollection.insertOne(applicationToInsert);
       res.status(201).json({ ...applicationToInsert, _id: result.insertedId });
     } catch (err) {
       console.error("Error creating application loan:", err);
@@ -863,7 +893,9 @@ app.patch(
         return res.status(400).json({ message: "Invalid status" });
       }
 
-      const application = await applicationLoansCollection.findOne({ _id: objectId });
+      const application = await applicationLoansCollection.findOne({
+        _id: objectId,
+      });
       if (!application) {
         return res.status(404).json({ message: "Application not found" });
       }
@@ -907,7 +939,9 @@ app.patch(
         update.reviewedBy = requesterEmail;
         update.reviewedAt = new Date();
         update.decisionReason =
-          normalizedStatus === "Pending" ? "" : String(req.body?.decisionReason || "");
+          normalizedStatus === "Pending"
+            ? ""
+            : String(req.body?.decisionReason || "");
       }
 
       if (normalizedStatus === "Cancelled") {
@@ -944,12 +978,17 @@ app.patch(
         return res.status(400).json({ message: "Invalid application id" });
       }
 
-      const application = await applicationLoansCollection.findOne({ _id: objectId });
+      const application = await applicationLoansCollection.findOne({
+        _id: objectId,
+      });
       if (!application) {
         return res.status(404).json({ message: "Application not found" });
       }
 
-      if (normalizeEmail(application.applicantEmail) !== normalizeEmail(req.user.email)) {
+      if (
+        normalizeEmail(application.applicantEmail) !==
+        normalizeEmail(req.user.email)
+      ) {
         return res.status(403).json({ message: "Forbidden" });
       }
 
@@ -987,12 +1026,17 @@ app.patch(
         return res.status(400).json({ message: "Invalid application id" });
       }
 
-      const application = await applicationLoansCollection.findOne({ _id: objectId });
+      const application = await applicationLoansCollection.findOne({
+        _id: objectId,
+      });
       if (!application) {
         return res.status(404).json({ message: "Application not found" });
       }
 
-      if (normalizeEmail(application.applicantEmail) !== normalizeEmail(req.user.email)) {
+      if (
+        normalizeEmail(application.applicantEmail) !==
+        normalizeEmail(req.user.email)
+      ) {
         return res.status(403).json({ message: "Forbidden" });
       }
 
@@ -1021,6 +1065,24 @@ app.patch(
 
 app.get("/", (req, res) => res.send("API is running..."));
 
+/* ------------------- ERROR HANDLER ------------------- */
+app.use((err, req, res, next) => {
+  console.error("Error:", err);
+
+  // Ensure CORS headers are set even on error
+  const origin = req.get("origin");
+  if (origin && allowedOrigins.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Access-Control-Allow-Credentials", "true");
+  }
+
+  if (err.message.includes("CORS")) {
+    return res.status(403).json({ error: "CORS policy violation" });
+  }
+
+  res.status(500).json({ error: err.message || "Internal server error" });
+});
+
 const PORT = process.env.PORT || 3000;
 
 // Graceful shutdown handler
@@ -1038,7 +1100,9 @@ async function gracefulShutdown(signal) {
 if (process.env.VERCEL) {
   module.exports = app;
 } else {
-  const server = app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+  const server = app.listen(PORT, () =>
+    console.log(`✅ Server running on port ${PORT}`),
+  );
 
   // Handle shutdown signals
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
