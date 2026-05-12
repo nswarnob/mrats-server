@@ -1,4 +1,5 @@
-import OpenAI from "openai";
+const OpenAI = require("openai").default;
+
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export const generateAIResponse = async (prompt) => {
@@ -20,3 +21,5 @@ If user asks about payment status, ask for their application ID or email to chec
     throw new Error("Failed to generate AI response");
   }
 };
+
+module.exports = { generateAIResponse };
