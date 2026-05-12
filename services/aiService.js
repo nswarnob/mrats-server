@@ -1,4 +1,4 @@
-const OpenAI = require("openai").default;
+const OpenAI = require("openai");
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -15,7 +15,7 @@ If user asks for loan eligibility, ask about their income, credit score, and emp
 If user asks about payment status, ask for their application ID or email to check status.`,
       input: prompt,
     });
-    return response.choices[0].message.content;
+    return response.output_text;
   } catch (err) {
     console.error("generateAIResponse error:", err.message);
     throw new Error("Failed to generate AI response");
