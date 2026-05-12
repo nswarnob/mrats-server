@@ -95,10 +95,10 @@ app.use(cookieParser());
 app.use(limiter);
 
 // Connect payment routes
-app.use("/api/payments", paymentRoutes);
+app.use("/api/routes", paymentRoutes);
 
 // Connect AI routes
-app.use("/api/ai", aiRoutes);
+app.use("/api/routes", aiRoutes);
 
 /* ------------------- HELPERS ------------------- */
 
