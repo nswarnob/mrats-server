@@ -2,7 +2,7 @@ const OpenAI = require("openai").default;
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-export const generateAIResponse = async (prompt) => {
+const generateAIResponse = async (prompt) => {
   try {
     const response = await client.responses.create({
       model: "gpt-5.4-mini",
@@ -15,9 +15,9 @@ If user asks for loan eligibility, ask about their income, credit score, and emp
 If user asks about payment status, ask for their application ID or email to check status.`,
       input: prompt,
     });
-    return response.output_text;
+    return response.choices[0].message.content;
   } catch (err) {
-    console.error("generateAIResponse error:", err);
+    console.error("generateAIResponse error:", err.message);
     throw new Error("Failed to generate AI response");
   }
 };
