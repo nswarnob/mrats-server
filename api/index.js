@@ -1,7 +1,4 @@
 const express = require("express");
-
-app.get("/favicon.ico", (req, res) => res.status(204).end());
-
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const cors = require("cors");
 require("dotenv").config();
@@ -15,6 +12,9 @@ const paymentRoutes = require("./routes/payments");
 const aiRoutes = require("./routes/ai");
 
 const app = express();
+
+// Favicon route
+app.get("/favicon.ico", (req, res) => res.status(204).end());
 
 /* ------------------- CONFIG ------------------- */
 
