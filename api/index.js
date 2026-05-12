@@ -14,7 +14,7 @@ const aiRoutes = require("./routes/ai");
 const app = express();
 
 // Favicon route
-app.get("/fevicon.ico", (req, res) => res.status(204).end());
+app.get("/favicon.ico", (req, res) => res.status(204).end());
 
 /* ------------------- CONFIG ------------------- */
 
