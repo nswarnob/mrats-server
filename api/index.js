@@ -88,6 +88,9 @@ app.use(
 
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
+
+app.get("/favicon.ico", (req, res) => res.status(404).end());
+
 app.use(limiter);
 
 // Connect payment routes
@@ -95,9 +98,6 @@ app.use("/api/payments", paymentRoutes);
 
 // Connect AI routes
 app.use("/api/ai", aiRoutes);
-
-
-app.get("/favicon.ico", (req, res) => res.status(404).end());
 
 /* ------------------- HELPERS ------------------- */
 
