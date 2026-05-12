@@ -1,4 +1,7 @@
 const express = require("express");
+
+app.get("/favicon.ico", (req, res) => res.status(204).end());
+
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const cors = require("cors");
 require("dotenv").config();
