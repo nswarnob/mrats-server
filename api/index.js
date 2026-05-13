@@ -6,15 +6,12 @@ const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const rateLimit = require("express-rate-limit");
 
+const app = express();
+
 // Import payment routes
 const paymentRoutes = require("./routes/payments");
 // Import AI routes
 const aiRoutes = require("./routes/ai");
-
-const app = express();
-
-// Favicon route
-app.get("/favicon.ico", (req, res) => res.status(204).end());
 
 /* ------------------- CONFIG ------------------- */
 
@@ -93,6 +90,9 @@ app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
 app.use(limiter);
+
+// Favicon route
+app.get("/favicon.ico", (req, res) => res.status(204).end());
 
 // Connect payment routes
 app.use("/api/routes", paymentRoutes);
